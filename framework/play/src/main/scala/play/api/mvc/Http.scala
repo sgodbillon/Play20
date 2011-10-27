@@ -3,6 +3,7 @@ package play.api.mvc {
   import play.api._
   import play.api.libs.iteratee._
   import play.api.libs.Crypto
+  import play.api.Configuration.Config
 
   import scala.annotation._
 
@@ -157,9 +158,9 @@ package play.api.mvc {
      */
     val emptyCookie: T
     /**
-     * States if the Cookie is signed. Defaults to false.
+     * Sign the Cookie with the provided key, if any. Defaults to None.
      */
-    val isSigned: Boolean = false
+    def signKey: Option[String] = None
 
     /**
      * Encode the data as String.
@@ -173,13 +174,17 @@ package play.api.mvc {
      */
     def decode(data: String): Map[String, String] = {
       try {
-        Option(data.trim).filterNot(_.isEmpty).flatMap(data =>
-          if (isSigned) {
-            val splitted = data.split("-")
-            if (splitted(0) == Crypto.sign(splitted(1)))
-              Some(splitted(1))
-            else None
-          } else Some(data)).map { data =>
+        Option(data.trim).filterNot(_.isEmpty).flatMap { data =>
+          if (signKey.isDefined) {
+            val (sign, value) = Some(data.span(_ != '-')).map { t => t.copy(_2 = t._2.drop(1)) }.get
+            if (sign == Crypto.sign(value, signKey.get.getBytes))
+              Some(value)
+            else {
+              Logger.warn("corrupted session")
+              None
+            }
+          } else Some(data)
+        }.map { data =>
           java.net.URLDecoder.decode(data).split("\u0000").map(_.split(":")).map(p => p(0) -> p.drop(1).mkString(":")).toMap
         }.getOrElse(Map.empty[String, String])
       } catch {
@@ -193,9 +198,9 @@ package play.api.mvc {
      */
     def encodeAsCookie(data: T): Cookie = {
       val cookie = encode(serialize(data))
-      Cookie(COOKIE_NAME, if (isSigned) {
-        Crypto.sign(cookie) + "-" + cookie
-      } else cookie)
+      Cookie(COOKIE_NAME, signKey.map { key =>
+        Crypto.sign(cookie, key.getBytes) + "-" + cookie
+      }.getOrElse(cookie))
     }
 
     /**
@@ -276,7 +281,13 @@ package play.api.mvc {
   object Session extends CookieBaker[Session] {
     val COOKIE_NAME = "PLAY_SESSION"
     val emptyCookie = new Session
-    override val isSigned = true
+    override def signKey = Play.maybeApplication.get.configuration.get("application.secret") match {
+      case Some(Config(_, value, _)) => Some(value)
+      case _ => {
+        Logger.warn("Missing application.secret")
+        None
+      }
+    }
 
     def deserialize(data: Map[String, String]) = new Session(data)
 
